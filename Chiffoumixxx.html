@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Papier, Pierre, Ciseaux - Adjacent Moves Only</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: linear-gradient(to bottom right, #a2d5f2, #07689f);
+      color: #333;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+
+    h1 {
+      color: #fff;
+      margin-bottom: 20px;
+      text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    }
+
+    .button {
+      padding: 12px 24px;
+      font-size: 18px;
+      color: white;
+      border: none;
+      border-radius: 20px;
+      cursor: pointer;
+      margin: 10px;
+      transition: transform 0.3s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    #playButton { background-color: #4a90e2; }
+    #playButton:hover { transform: scale(1.05); }
+
+    #bestSequenceButton { background-color: #2ecc71; }
+    #bestSequenceButton:hover { transform: scale(1.05); }
+
+    #resetButton { background-color: #f5a623; }
+    #resetButton:hover { transform: scale(1.05); }
+
+    #undoButton { background-color: #d9534f; }
+    #undoButton:hover { transform: scale(1.05); }
+
+    #grid {
+      display: grid;
+      grid-template-columns: repeat(10, 60px);
+      gap: 8px;
+      padding: 20px;
+      background-color: rgba(255, 255, 255, 0.8);
+      border-radius: 20px;
+      box-shadow: 0 8px 16px rgba(0, 0, 0, 0.2);
+    }
+
+    .cell {
+      width: 60px;
+      height: 60px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      font-size: 32px;
+      border-radius: 12px;
+    }
+
+    .cell.paper { background-color: #4a90e2; color: #fff; }
+    .cell.rock { background-color: #f5d142; color: #fff; }
+    .cell.scissors { background-color: #f79530; color: #fff; }
+    .cell.empty { background-color: #ffffff; box-shadow: none; }
+
+    #status {
+      margin-top: 15px;
+      font-size: 18px;
+      font-weight: bold;
+      color: #fff;
+    }
+
+    #loadingInfo {
+      color: #fff;
+      margin-top: 10px;
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <h1>Papier, Pierre, Ciseaux (mouvements adjacents)</h1>
+  <div>
+    <button id="playButton" class="button">Jouer automatiquement (aléatoire)</button>
+    <button id="bestSequenceButton" class="button">Trouver la meilleure séquence</button>
+    <button id="resetButton" class="button">Réinitialiser la grille</button>
+    <button id="undoButton" class="button">Annuler dernier coup</button>
+  </div>
+  <div id="grid"></div>
+  <div id="status">Mouvements : 0</div>
+  <div id="loadingInfo"></div>
+
+  <audio id="moveSound" src="https://www.soundjay.com/button/beep-07.wav"></audio>
+
+<script>
+  // --- Paramètres globaux ---
+  const gridSize = 10;
+  const PAPER = 0, ROCK = 1, SCISSORS = 2, EMPTY = 3;
+  const items = ['paper', 'rock', 'scissors', 'empty'];
+  const symbols = ['📄', '🪨', '✂️', ''];
+
+  // loseRules[x] = y signifie "x perd contre y".
+  const loseRules = {
+    [SCISSORS]: ROCK,   // Les ciseaux perdent contre la pierre
+    [ROCK]: PAPER,      // La pierre perd contre le papier
+    [PAPER]: SCISSORS   // Le papier perd contre les ciseaux
+  };
+
+  // --- Éléments du DOM ---
+  const gridContainer = document.getElementById('grid');
+  const playButton = document.getElementById('playButton');
+  const bestSequenceButton = document.getElementById('bestSequenceButton');
+  const resetButton = document.getElementById('resetButton');
+  const undoButton = document.getElementById('undoButton');
+  const status = document.getElementById('status');
+  const moveSound = document.getElementById('moveSound');
+  const loadingInfo = document.getElementById('loadingInfo');
+
+  // --- Variables de grille & historique ---
+  const grid = [];
+  let moveCount = 0;
+  let moveHistory = [];
+
+  // Offsets pour les cases adjacentes (4 directions orthogonales)
+  // Si vous voulez inclure les diagonales, décommentez les lignes correspondantes
+  const neighbors = [
+    { dr: -1, dc: 0 }, // haut
+    { dr: 1,  dc: 0 }, // bas
+    { dr: 0,  dc: -1}, // gauche
+    { dr: 0,  dc: 1 }  // droite
+
+    // Pour 8 directions, rajouter :
+    // { dr: -1, dc: -1 },
+    // { dr: -1, dc:  1 },
+    // { dr:  1, dc: -1 },
+    // { dr:  1, dc:  1 }
+  ];
+
+  // --- Fonctions utilitaires ---
+  function cloneGrid(g) {
+    return JSON.parse(JSON.stringify(g));
+  }
+
+  function countPieces(g) {
+    let count = 0;
+    for (let r = 0; r < gridSize; r++) {
+      for (let c = 0; c < gridSize; c++) {
+        if (g[r][c] !== EMPTY) count++;
+      }
+    }
+    return count;
+  }
+
+  // Vérifie si les coordonnées (r,c) sont dans la grille
+  function inBounds(r, c) {
+    return r >= 0 && r < gridSize && c >= 0 && c < gridSize;
+  }
+
+  // Vérifie si un coup (fromRow,fromCol) => (toRow,toCol) est valide
+  function isValidMove(fromRow, fromCol, toRow, toCol, g) {
+    const fromItem = g[fromRow][fromCol];
+    const toItem   = g[toRow][toCol];
+    if (fromItem === EMPTY || toItem === EMPTY) return false;
+    return (loseRules[fromItem] === toItem || loseRules[toItem] === fromItem);
+  }
+
+  // Renvoie une copie de g après application d'un coup
+  // (source perd => la source est vidée, cible perd => la source la remplace)
+  function applyMove(g, fromRow, fromCol, toRow, toCol) {
+    const newGrid = cloneGrid(g);
+    const fromItem = newGrid[fromRow][fromCol];
+    const toItem   = newGrid[toRow][toCol];
+
+    if (loseRules[fromItem] === toItem) {
+      newGrid[fromRow][fromCol] = EMPTY;
+    } else if (loseRules[toItem] === fromItem) {
+      newGrid[toRow][toCol] = fromItem;
+      newGrid[fromRow][fromCol] = EMPTY;
+    }
+    return newGrid;
+  }
+
+  // --- Obtenir tous les coups valides "adjacents" ---
+  function getAllValidMoves(g) {
+    const moves = [];
+    for (let fr = 0; fr < gridSize; fr++) {
+      for (let fc = 0; fc < gridSize; fc++) {
+        if (g[fr][fc] !== EMPTY) {
+          // Vérifie les cases adjacentes
+          for (let {dr, dc} of neighbors) {
+            const tr = fr + dr;
+            const tc = fc + dc;
+            if (inBounds(tr, tc)) {
+              if (isValidMove(fr, fc, tr, tc, g)) {
+                moves.push({ fromRow: fr, fromCol: fc, toRow: tr, toCol: tc });
+              }
+            }
+          }
+        }
+      }
+    }
+    return moves;
+  }
+
+  // --- Simule une partie aléatoire (Monte Carlo) ---
+  function simulateRandomGame(startGrid) {
+    let currentGrid = cloneGrid(startGrid);
+    const movesSequence = [];
+    const MAX_MOVES = 500; // Limite pour ne pas boucler trop longtemps
+
+    while (movesSequence.length < MAX_MOVES) {
+      const validMoves = getAllValidMoves(currentGrid);
+      if (validMoves.length === 0) break; // plus de coups possibles
+      // Choix aléatoire
+      const rnd = Math.floor(Math.random() * validMoves.length);
+      const mv = validMoves[rnd];
+
+      currentGrid = applyMove(currentGrid, mv.fromRow, mv.fromCol, mv.toRow, mv.toCol);
+      movesSequence.push(mv);
+    }
+
+    return { finalGrid: currentGrid, movesSequence };
+  }
+
+  // --- Lance X simulations et renvoie la meilleure (moins de pions) ---
+  function findBestSequenceMonteCarlo(originalGrid, trials=200) {
+    let bestCount = Infinity;
+    let bestGrid = null;
+    let bestMoves = [];
+
+    const startClone = cloneGrid(originalGrid);
+
+    for (let i = 0; i < trials; i++) {
+      const { finalGrid, movesSequence } = simulateRandomGame(startClone);
+      const nb = countPieces(finalGrid);
+      if (nb < bestCount) {
+        bestCount = nb;
+        bestGrid = finalGrid;
+        bestMoves = movesSequence;
+      }
+    }
+    return { bestGrid, bestMoves, bestCount };
+  }
+
+  // --- Rejoue une séquence de coups, visuellement ---
+  function replayMoves(movesSequence) {
+    let index = 0;
+    const replayInterval = setInterval(() => {
+      if (index >= movesSequence.length) {
+        clearInterval(replayInterval);
+        return;
+      }
+      const mv = movesSequence[index];
+      index++;
+
+      // On sauvegarde l'état avant
+      moveHistory.push(cloneGrid(grid));
+      moveCount++;
+      status.textContent = `Mouvements : ${moveCount}`;
+
+      // On applique le coup
+      const fromItem = grid[mv.fromRow][mv.fromCol];
+      const toItem   = grid[mv.toRow][mv.toCol];
+      if (loseRules[fromItem] === toItem) {
+        grid[mv.fromRow][mv.fromCol] = EMPTY;
+      } else if (loseRules[toItem] === fromItem) {
+        grid[mv.toRow][mv.toCol] = fromItem;
+        grid[mv.fromRow][mv.fromCol] = EMPTY;
+      }
+
+      moveSound.play();
+      updateGrid();
+    }, 300);
+  }
+
+  // --- Création / Réinitialisation de la grille ---
+  function createGrid() {
+    gridContainer.innerHTML = '';
+    moveCount = 0;
+    moveHistory = [];
+    status.textContent = `Mouvements : ${moveCount}`;
+
+    for (let row = 0; row < gridSize; row++) {
+      grid[row] = [];
+      for (let col = 0; col < gridSize; col++) {
+        const cell = document.createElement('div');
+        cell.classList.add('cell');
+
+        const item = Math.floor(Math.random() * 3);
+        grid[row][col] = item;
+
+        cell.classList.add(items[item]);
+        cell.textContent = symbols[item];
+        cell.dataset.row = row;
+        cell.dataset.col = col;
+        cell.draggable = true;
+
+        gridContainer.appendChild(cell);
+
+        cell.addEventListener('dragstart', dragStart);
+        cell.addEventListener('dragover', dragOver);
+        cell.addEventListener('drop', drop);
+      }
+    }
+  }
+
+  function updateGrid() {
+    const allCells = document.querySelectorAll('.cell');
+    allCells.forEach((cell, i) => {
+      const row = Math.floor(i / gridSize);
+      const col = i % gridSize;
+      cell.className = `cell ${items[grid[row][col]]}`;
+      cell.textContent = symbols[grid[row][col]];
+    });
+  }
+
+  // --- Drag & Drop ---
+  let dragSrcEl = null;
+  function dragStart(e) {
+    dragSrcEl = this;
+  }
+  function dragOver(e) {
+    e.preventDefault();
+  }
+  function drop(e) {
+    const fromRow = parseInt(dragSrcEl.dataset.row);
+    const fromCol = parseInt(dragSrcEl.dataset.col);
+    const toRow   = parseInt(this.dataset.row);
+    const toCol   = parseInt(this.dataset.col);
+    moveItem(fromRow, fromCol, toRow, toCol);
+  }
+
+  // --- Mécanique de déplacement "adjacent only" ---
+  function moveItem(fromRow, fromCol, toRow, toCol) {
+    // Vérifions qu'ils sont adjacents (4 directions)
+    const dRow = toRow - fromRow;
+    const dCol = toCol - fromCol;
+    if (Math.abs(dRow) + Math.abs(dCol) !== 1) {
+      // pas adjacent orthogonal
+      return;
+    }
+
+    const fromItem = grid[fromRow][fromCol];
+    const toItem   = grid[toRow][toCol];
+    if (fromItem === EMPTY || toItem === EMPTY) return;
+
+    // On sauvegarde l'état avant
+    moveHistory.push(cloneGrid(grid));
+
+    // Logique Pierre/Papier/Ciseaux
+    if (loseRules[fromItem] === toItem) {
+      // Source perd => vide la source
+      grid[fromRow][fromCol] = EMPTY;
+    } else if (loseRules[toItem] === fromItem) {
+      // Cible perd => la source la remplace
+      grid[toRow][toCol] = fromItem;
+      grid[fromRow][fromCol] = EMPTY;
+    } else {
+      // Mouvement invalide => on annule
+      moveHistory.pop();
+      return;
+    }
+
+    moveCount++;
+    moveSound.play();
+    status.textContent = `Mouvements : ${moveCount}`;
+    updateGrid();
+  }
+
+  // --- Undo ---
+  undoButton.addEventListener('click', () => {
+    if (moveHistory.length) {
+      const prevState = moveHistory.pop();
+      grid.splice(0, gridSize, ...prevState);
+      moveCount--;
+      updateGrid();
+      status.textContent = `Mouvements : ${moveCount}`;
+    }
+  });
+
+  // --- Réinitialisation ---
+  resetButton.addEventListener('click', createGrid);
+
+  // --- Autoplay aléatoire ---
+  let autoPlayInterval = null;
+  let isAutoPlaying = false;
+
+  function toggleAutoPlay() {
+    isAutoPlaying = !isAutoPlaying;
+    if (isAutoPlaying) {
+      playButton.textContent = "Stop";
+      autoPlayInterval = setInterval(() => {
+        const validMoves = getAllValidMoves(grid);
+        if (validMoves.length === 0) {
+          clearInterval(autoPlayInterval);
+          isAutoPlaying = false;
+          playButton.textContent = "Jouer automatiquement (aléatoire)";
+        } else {
+          const mv = validMoves[Math.floor(Math.random() * validMoves.length)];
+          moveItem(mv.fromRow, mv.fromCol, mv.toRow, mv.toCol);
+        }
+      }, 500);
+    } else {
+      playButton.textContent = "Jouer automatiquement (aléatoire)";
+      clearInterval(autoPlayInterval);
+    }
+  }
+
+  playButton.addEventListener('click', toggleAutoPlay);
+
+  // --- Bouton "Trouver la meilleure séquence" ---
+  bestSequenceButton.addEventListener('click', async () => {
+    bestSequenceButton.disabled = true;
+    loadingInfo.textContent = "Recherche en cours...";
+
+    const monteCarloTrials = 200;
+    const startClone = cloneGrid(grid);
+
+    // Petit délai pour permettre d’afficher "Recherche en cours..."
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const { bestGrid, bestMoves, bestCount } = findBestSequenceMonteCarlo(startClone, monteCarloTrials);
+
+    // On restaure la grille de départ telle qu'elle était
+    createGrid();
+    for (let r = 0; r < gridSize; r++) {
+      for (let c = 0; c < gridSize; c++) {
+        grid[r][c] = startClone[r][c];
+      }
+    }
+    updateGrid();
+
+    loadingInfo.textContent = `Meilleure séquence (sur ${monteCarloTrials} essais) : ${bestCount} pièces restantes. Rejeu...`;
+
+    // On rejoue la suite
+    replayMoves(bestMoves);
+
+    bestSequenceButton.disabled = false;
+  });
+
+  // Initialisation
+  createGrid();
+</script>
+</body>
+</html>
